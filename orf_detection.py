@@ -40,6 +40,7 @@ TODO
 """
 import io
 import os
+import re
 import csv
 import sys
 import gzip
@@ -47,88 +48,75 @@ import glob
 import argparse
 from Bio import Seq, SeqIO
 
-# @Trey: initially I tend to skip the "if __name__ == '__main__':" Python
-# idiom. This makes it easier to debug since the state of the program is
-# availble in the global namespace after execution in IPython.
+def main():
+    """Main"""
+    args = parse_args()
 
-#########################################
-# Main
-#########################################
+    # Load genome sequence
+    chromosomes = {x.id:x for x in SeqIO.parse(args.fasta, format='fasta')}
 
-# Parse input
-parser = argparse.ArgumentParser(description='Ribo-Seq ORF detection.')
-parser.add_argument('-f', '--fasta', required=True,
-                   help='Location of genome.')
-parser.add_argument('-g', '--gff', required=True,
-                   help='Location of GFF annotation file to use.')
-parser.add_argument('-w', '--window-size', default=100,
-                   help=('Additional bases on either side of putative CDS to '
-                         'include when looking for ORFs.'))
-parser.add_argument('-m', '--min-size', default=50,
-                    help='Minimum ORF amino acid size to search for.')
-parser.add_argument('forward', metavar='PATH',
-                   help=('Wildcard string specifying path to forward-strand'
-                         'input files'))
-parser.add_argument('reverse', metavar='PATH',
-                   help=('Wildcard string specifying path to reverse-strand'
-                         'input files'))
-args = parser.parse_args()
+    # Load annotations
 
-# Check for incorrect or missing input
-if ((not os.path.isfile(args.gff)) or
-    (len(args.forward) == 0) or
-    (len(args.reverse) == 0)):
-        print("Invalid input!\n")
-        parser.print_help()
-        sys.exit()
+    # Iterate over ribosome profiling coordinates
+    # Positive strand
+    for infile in args.forward_strand:
+        # determine chromosome number
+        ch_num = re.match('.*(LmjF\.\d+).*', infile).groups()[0]
+        ch = chromosomes[ch_num]
 
-# Expand glob string
-forward_strand = glob.glob(args.forward)
-reverse_strand = glob.glob(args.reverse)
+        # load file
+        fp = gzip.open(infile) if infile.endswith('.gz') else open(infile)
 
-# Load genome sequence
-chromosomes = {x.id:x for x in SeqIO.parse(args.fasta, format='fasta')}
+        reader = csv.DictReader(io.TextIOWrapper(fp),
+                                fieldnames=['id', 'start', 'stop'])
 
-# Load annotations
+        # Skip header row
+        _ = next(reader)
 
-# Iterate over ribosome profiling coordinates
-# Positive strand
-for infile in forward_strand:
-    # determine chromosome number
-    ch_num = re.match('.*(LmjF\.\d+).*', infile).groups()[0]
-    ch = chromosomes[ch_num]
+        # Iterate over putative coding sequences
+        for cds in reader:
+            # Length of putative CDS
+            cds_length = int(cds['stop']) - int(cds['start'])
 
-    # load file
-    fp = gzip.open(infile) if infile.endswith('.gz') else open(infile)
+            # Skip over very small translated regions
+            #if cds_length < 30:
+            #    continue
 
-    reader = csv.DictReader(io.TextIOWrapper(fp),
-                            fieldnames=['id', 'start', 'stop'])
+            # Determine region to look for overlapping orfs
+            start = int(cds['start']) - args.window_size
+            stop = int(cds['stop']) + args.window_size
 
-    # Skip header row
-    _ = next(reader)
+            # Pull sequence for the range
+            cds_padded = ch[start:stop].seq
 
-    # Iterate over putative coding sequences
-    for cds in reader:
-        # Determine region to look for overlapping orfs
-        start = int(cds['start']) - args.window_size
-        stop = int(cds['stop']) + args.window_size
+            # Find all possible ORFs in the above region
+            orfs = find_orfs(cds_padded, args.min_size)
 
-        # Pull sequence for the range
-        cds_padded = ch[start:stop].seq
+            # If no ORFs found in specified region, continue
+            if len(orfs) == 0:
+                print("No ORFs found for current CDS (len: %d)" % cds_length)
+                continue
 
-        # Find all possible ORFs in the above region
-        orfs = find_orfs(cds_padded, args.min_size)
+            # Find the best match
+            best_match = orfs[0]
+            best_score = compute_score(cds_padded, orfs[0], args.window_size)
 
-        # Find the best match
-        best_match = orfs[0]
-        best_score = compute_score(cds_padded, orfs[0], args.window_size)
+            if len(orfs) > 1:
+                for orf in orfs[1:]:
+                    score = compute_score(cds_padded, orf, args.window_size)
+                if score > best_score:
+                    best_match = orf
+                    best_score = score
 
-        if len(orfs) > 1:
-            for orf in orfs[1:]
-                score = compute_score(cds_padded, orf, args.window_size)
-            if score > best_score:
-                best_match = orf
-                best_score = score
+            print("Score: %f (len: %d)" % (best_score, cds_length))
+
+    # Reverse strand
+
+    # Filter out known CDSs
+
+    # Filter out low-scoring matches?
+
+    # Generate a list of possible
 
 def compute_score(cds, orf, window_size):
     """
@@ -170,25 +158,24 @@ def compute_score(cds, orf, window_size):
     orf_length =  orf[END] - orf[START]
 
     # Number of overlapping bases
-    overlap = min(orf[END], cds_length + window_size)
+    overlap = (min(orf[END], cds_length + window_size) -
+               max(window_size, orf[START]))
 
     # Number of non-overlapping bases
-    non_overlap = orf_length - overlap
+    #non_overlap = orf_length - overlap
 
     # Fit and overlap score components
     fit_score = 1 - (abs(orf_length - cds_length) /
                      max(orf_length, cds_length))
     overlap_score = overlap / orf_length
 
+    # QUESTION:
+    # Should we penalize ORFs that are smaller than the CDSs?
+    # Currently, an ORF that falls entirely within the CDS will achieve the
+    # maximum overlap score (0.5).
+
     # For now, we will weight each component equally
     return (0.5 * fit_score) + (0.5 * overlap_score)
-
-# Reverse strand
-
-# Filter out known CDSs
-
-# Generate a list of possible
-
 
 def find_orfs(seq, min_protein_length, strand=1, trans_table=1):
     """
@@ -246,3 +233,42 @@ def find_orfs(seq, min_protein_length, strand=1, trans_table=1):
     answer.sort()
     return answer
 
+def parse_args():
+    """Parses input arguments"""
+    # Parse input
+    parser = argparse.ArgumentParser(description='Ribo-Seq ORF detection.')
+    parser.add_argument('-f', '--fasta', required=True,
+                    help='Location of genome.')
+    parser.add_argument('-g', '--gff', required=True,
+                    help='Location of GFF annotation file to use.')
+    parser.add_argument('-w', '--window-size', default=100,
+                    help=('Additional bases on either side of putative CDS to '
+                            'include when looking for ORFs.'))
+    parser.add_argument('-m', '--min-size', default=50,
+                        help='Minimum ORF amino acid size to search for.')
+    parser.add_argument('forward', metavar='PATH',
+                    help=('Wildcard string specifying path to forward-strand'
+                            'input files'))
+    parser.add_argument('reverse', metavar='PATH',
+                    help=('Wildcard string specifying path to reverse-strand'
+                            'input files'))
+    args = parser.parse_args()
+
+    # Check for incorrect or missing input
+    if not os.path.isfile(args.gff):
+        raise IOError("Invalid GFF filepath")
+    if not os.path.isfile(args.fasta):
+        raise IOError("Invalid FASTA filepath")
+
+    # Expand glob string
+    args.forward_strand = glob.glob(args.forward)
+    args.reverse_strand = glob.glob(args.reverse)
+
+    if len(args.forward_strand) == 0 or len(args.reverse_strand) == 0:
+        raise IOError("Invalid input expression for forward or reverse strand")
+
+    return args
+
+
+if __name__ == "__main__":
+    sys.exit(main())
