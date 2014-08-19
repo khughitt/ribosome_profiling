@@ -61,6 +61,11 @@ parser.add_argument('-f', '--fasta', required=True,
                    help='Location of genome.')
 parser.add_argument('-g', '--gff', required=True,
                    help='Location of GFF annotation file to use.')
+parser.add_argument('-w', '--window-size', default=100,
+                   help=('Additional bases on either side of putative CDS to '
+                         'include when looking for ORFs.'))
+parser.add_argument('-m', '--min-size', default=50,
+                    help='Minimum ORF amino acid size to search for.')
 parser.add_argument('forward', metavar='PATH',
                    help=('Wildcard string specifying path to forward-strand'
                          'input files'))
@@ -94,40 +99,89 @@ for infile in forward_strand:
     ch = chromosomes[ch_num]
 
     # load file
-    if infile.endswith('.gz'):
-        fp = gzip.open(infile)
-    else:
-        fp = open(infile)
+    fp = gzip.open(infile) if infile.endswith('.gz') else open(infile)
 
     reader = csv.DictReader(io.TextIOWrapper(fp),
                             fieldnames=['id', 'start', 'stop'])
 
-    # Iterate over putative coding sequences
-    for i, region in enumerate(reader):
-        # skip header row
-        if region['id'] == '':
-            continue
+    # Skip header row
+    _ = next(reader)
 
+    # Iterate over putative coding sequences
+    for cds in reader:
         # Determine region to look for overlapping orfs
-        start = int(region['start']) - 100
-        stop = int(region['stop']) + 100
+        start = int(cds['start']) - args.window_size
+        stop = int(cds['stop']) + args.window_size
 
         # Pull sequence for the range
-        seq = ch[start:stop].seq
+        cds_padded = ch[start:stop].seq
 
         # Find all possible ORFs in the above region
-        orfs = find_orfs(seq, 50)
+        orfs = find_orfs(cds_padded, args.min_size)
 
         # Find the best match
         best_match = orfs[0]
-
-        # Score = len(orf) * percent_overlap
-        best_score =
+        best_score = compute_score(cds_padded, orfs[0], args.window_size)
 
         if len(orfs) > 1:
-
             for orf in orfs[1:]
+                score = compute_score(cds_padded, orf, args.window_size)
+            if score > best_score:
+                best_match = orf
+                best_score = score
 
+def compute_score(cds, orf, window_size):
+    """
+    Computes the match score of a putative ORF for a putative CDS.
+
+    The goal of this function is to determine which of the ORFs contained
+    within a given sequence range is most likely to correspond to the "true"
+    CDS indicated by a translated region in the ribosome profiling data.
+
+    To two criteria used to determine this are:
+        1. Similarity between ribosome profiling region and ORF size
+        2. Amount of overlap between the two regions
+
+    Thus, a likely candidate ORF will be very close in size to the translated
+    region, and will share a high overlap with the putative CDS.
+
+    Arguments
+    ---------
+    cds : Bio.Seq
+        A BioPython Seq instance representing the padded region containing a
+        putative CDS.
+    orf : tuple
+        A triplet containing the start, stop, and strand information for an
+        ORF in the region of interest.
+    window_size: int
+        The amount of bases added to either side of the CDS when searching for
+        ORFs.
+
+    Returns
+    -------
+    score : float
+        Returns a normalized score in the range of 0-1.
+    """
+    START = 0
+    END = 1
+
+    # CDS and ORF lengths
+    cds_length = len(cds) - (2 * window_size)
+    orf_length =  orf[END] - orf[START]
+
+    # Number of overlapping bases
+    overlap = min(orf[END], cds_length + window_size)
+
+    # Number of non-overlapping bases
+    non_overlap = orf_length - overlap
+
+    # Fit and overlap score components
+    fit_score = 1 - (abs(orf_length - cds_length) /
+                     max(orf_length, cds_length))
+    overlap_score = overlap / orf_length
+
+    # For now, we will weight each component equally
+    return (0.5 * fit_score) + (0.5 * overlap_score)
 
 # Reverse strand
 
