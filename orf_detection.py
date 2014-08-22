@@ -33,10 +33,6 @@ Usage
 ./orf_detection.py --gff=annotations.gff \
         "/path/to/riboseq/forward-strand/data/*.forward.csv.gz"
         "/path/to/riboseq/reverse-strand/data/*.reverse.csv.gz"
-
-TODO
-----
-- Everything...
 """
 import io
 import os
@@ -64,59 +60,78 @@ def main():
         ch_num = re.match('.*(LmjF\.\d+).*', infile).groups()[0]
         ch = chromosomes[ch_num]
 
-        # load file
-        fp = gzip.open(infile) if infile.endswith('.gz') else open(infile)
+        result = find_matching_orfs(infile, args.outdir, ch, '+',
+                                    args.window_size, args.min_size)
 
-        reader = csv.DictReader(io.TextIOWrapper(fp),
-                                fieldnames=['id', 'start', 'stop'])
+def find_matching_orfs(infile, outdir, ch, strand, window_size, min_size):
+    """Parses the specified file of putative CDSs and return a list of
+       the best matching ORFs for each translated region."""
+    # load file
+    fp = gzip.open(infile) if infile.endswith('.gz') else open(infile)
 
-        # Skip header row
-        _ = next(reader)
+    reader = csv.DictReader(io.TextIOWrapper(fp),
+                            fieldnames=['id', 'start', 'stop'])
 
-        # Iterate over putative coding sequences
-        for cds in reader:
-            # Length of putative CDS
-            cds_length = int(cds['stop']) - int(cds['start'])
+    # Output filenamoe
+    outfilename = os.path.basename(os.path.splitext(infile)[0]) + ".bed"
+    outfile = os.path.join(outdir, outfilename)
 
-            # Skip over very small translated regions
-            #if cds_length < 30:
-            #    continue
+    # Open CSV writer
+    outfp = open(outfile, 'w')
+    writer = csv.writer(outfp, delimiter='\t')
 
-            # Determine region to look for overlapping orfs
-            start = int(cds['start']) - args.window_size
-            stop = int(cds['stop']) + args.window_size
+    # Skip header row
+    _ = next(reader)
 
-            # Pull sequence for the range
-            cds_padded = ch[start:stop].seq
+    # Iterate over putative coding sequences
+    for i, cds in enumerate(reader):
+        # Length of putative CDS
+        cds_length = int(cds['stop']) - int(cds['start'])
 
-            # Find all possible ORFs in the above region
-            orfs = find_orfs(cds_padded, args.min_size)
+        # Skip over very small translated regions
+        #if cds_length < 30:
+        #    continue
 
-            # If no ORFs found in specified region, continue
-            if len(orfs) == 0:
-                print("No ORFs found for current CDS (len: %d)" % cds_length)
-                continue
+        # Determine region to look for overlapping orfs
+        start = int(cds['start']) - window_size
+        stop = int(cds['stop']) + window_size
 
-            # Find the best match
-            best_match = orfs[0]
-            best_score = compute_score(cds_padded, orfs[0], args.window_size)
+        # Pull sequence for the range
+        cds_padded = ch[start:stop].seq
 
-            if len(orfs) > 1:
-                for orf in orfs[1:]:
-                    score = compute_score(cds_padded, orf, args.window_size)
-                if score > best_score:
-                    best_match = orf
-                    best_score = score
+        # Find all possible ORFs in the above region
+        orfs = find_orfs(cds_padded, min_size)
+        print("Checking CDS %d (%d possible ORFs)" % (i, len(orfs)))
 
-            print("Score: %f (len: %d)" % (best_score, cds_length))
+        # If no ORFs found in specified region, continue
+        if len(orfs) == 0:
+            print("No ORFs found for current CDS (len: %d)" % cds_length)
+            continue
 
-    # Reverse strand
+        # Find the best match
+        best_match = orfs[0]
+        best_score = compute_score(cds_padded, orfs[0], window_size)
+
+        if len(orfs) > 1:
+            for orf in orfs[1:]:
+                score = compute_score(cds_padded, orf, window_size)
+            if score > best_score:
+                best_match = orf
+                best_score = score
+
+        print("Score: %f (len: %d)" % (best_score, cds_length))
+
+        # Write entry in bed file
+        orf_start = start + orf[0]
+        orf_stop = start + orf[1]
+        row = [ch.id, orf_start, orf_stop, "CDS%d" % i,
+               best_score * 1000, orf[2]]
+        writer.writerow(row)
+
+    outfp.close()
 
     # Filter out known CDSs
-
     # Filter out low-scoring matches?
-
-    # Generate a list of possible
 
 def compute_score(cds, orf, window_size):
     """
@@ -161,13 +176,15 @@ def compute_score(cds, orf, window_size):
     overlap = (min(orf[END], cds_length + window_size) -
                max(window_size, orf[START]))
 
+    # Overlap score
+    overlap_score = overlap / orf_length
+
     # Number of non-overlapping bases
     #non_overlap = orf_length - overlap
 
-    # Fit and overlap score components
+    # How similar ORF and CDS sizes are (1 = same size)
     fit_score = 1 - (abs(orf_length - cds_length) /
                      max(orf_length, cds_length))
-    overlap_score = overlap / orf_length
 
     # QUESTION:
     # Should we penalize ORFs that are smaller than the CDSs?
@@ -186,50 +203,50 @@ def find_orfs(seq, min_protein_length, strand=1, trans_table=1):
     answer = []
     seq_len = len(seq)
 
-    # Get sequence associated with the specified location and strand
-    if strand == 1:
-        dna_seq = seq
-    else:
-        dna_seq = seq.reverse_complement()
+    # nucleotide sequence
+    nuc = seq if strand == +1 else seq.reverse_complement()
 
+    # start at the begining of the translated sequence
+    aa_start = 0
+
+    # iterate over reading frames
     for frame in range(3):
-        trans = str(dna_seq[frame:].translate(trans_table))
+        # translate sequence
+        trans = str(nuc[frame:].translate(trans_table))
         trans_len = len(trans)
-        aa_start = 0
+        ##            aa_start = 0
+
+        # find the next methionine
+        aa_start = trans.find("M", aa_start)
         aa_end = 0
 
-        # Iterate through ORFS in reading frame
         while aa_start < trans_len:
-            # Set end counter to position of next stop codon
-            aa_start = trans.find("M", aa_start)
+            # find nearest stop codon
             aa_end = trans.find("*", aa_start)
 
-            # If no start or stop codons found, stop here
-            if aa_start == -1 or aa_end == -1:
-                break
-
-            # extend stop codon until ORF is of sufficient length
-            while (aa_end - aa_start < min_protein_length) and aa_end > -1:
-                aa_end = trans.find("*", aa_end + 1)
-
-            # If no ORFs of sufficent size found, stop here
+            # if no stop codon is found, go until end of sequence
             if aa_end == -1:
+                aa_end = trans_len
+
+            # check to make sure that ORF meets size requirements
+            if aa_end - aa_start >= min_protein_length:
+                if strand == 1:
+                    start = frame + aa_start * 3
+                    end = min(seq_len, frame + (aa_end * 3) + 3)
+                else:
+                    start = seq_len-frame - (aa_end * 3) - 3
+                    end = seq_len - frame - (aa_start * 3)
+
+                # Add to output
+                str_strand = "+" if strand == 1 else '-'
+                answer.append((start, end, str_strand))
+
+            # Find next Methionine and continue search
+            aa_start = trans.find("M", aa_start + 1)
+            if aa_start == -1:
                 break
 
-            # Compute coordinates of ORF
-            if strand == 1:
-                start = frame + aa_start * 3
-                end = min(seq_len, frame + aa_end * 3 + 3)
-            else:
-                start = seq_len - frame - aa_end * 3 - 3
-                end = seq_len - frame - aa_start * 3
-
-            # Add to output
-            str_strand = "+" if strand == 1 else '-'
-            answer.append((start, end, str_strand))
-
-            # increment start counter and continue
-            aa_start = aa_end + 1
+    # sort and return list of ORFs
     answer.sort()
     return answer
 
@@ -241,6 +258,8 @@ def parse_args():
                     help='Location of genome.')
     parser.add_argument('-g', '--gff', required=True,
                     help='Location of GFF annotation file to use.')
+    parser.add_argument('-o', '--outdir', default='output',
+                    help='Directory to save output to.')
     parser.add_argument('-w', '--window-size', default=100,
                     help=('Additional bases on either side of putative CDS to '
                             'include when looking for ORFs.'))
@@ -267,8 +286,11 @@ def parse_args():
     if len(args.forward_strand) == 0 or len(args.reverse_strand) == 0:
         raise IOError("Invalid input expression for forward or reverse strand")
 
-    return args
+    # Create output directory
+    if not os.path.exists(args.outdir):
+        os.makedirs(args.outdir)
 
+    return args
 
 if __name__ == "__main__":
     sys.exit(main())
