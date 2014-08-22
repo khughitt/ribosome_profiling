@@ -73,7 +73,8 @@ def find_matching_orfs(infile, outdir, ch, strand, window_size, min_size):
                             fieldnames=['id', 'start', 'stop'])
 
     # Output filenamoe
-    outfilename = os.path.basename(os.path.splitext(infile)[0]) + ".bed"
+    outfilename = (os.path.basename(infile).replace('.csv', '')
+                                           .replace('.gz', '') + ".bed")
     outfile = os.path.join(outdir, outfilename)
 
     # Open CSV writer
@@ -122,10 +123,10 @@ def find_matching_orfs(infile, outdir, ch, strand, window_size, min_size):
         print("Score: %f (len: %d)" % (best_score, cds_length))
 
         # Write entry in bed file
-        orf_start = start + orf[0]
-        orf_stop = start + orf[1]
+        orf_start = start + best_orf[0]
+        orf_stop = start + best_orf[1]
         row = [ch.id, orf_start, orf_stop, "CDS%d" % i,
-               best_score * 1000, orf[2]]
+               best_score * 1000, best_orf[2]]
         writer.writerow(row)
 
     outfp.close()
@@ -214,7 +215,6 @@ def find_orfs(seq, min_protein_length, strand=1, trans_table=1):
         # translate sequence
         trans = str(nuc[frame:].translate(trans_table))
         trans_len = len(trans)
-        ##            aa_start = 0
 
         # find the next methionine
         aa_start = trans.find("M", aa_start)
@@ -243,6 +243,7 @@ def find_orfs(seq, min_protein_length, strand=1, trans_table=1):
 
             # Find next Methionine and continue search
             aa_start = trans.find("M", aa_start + 1)
+
             if aa_start == -1:
                 break
 
