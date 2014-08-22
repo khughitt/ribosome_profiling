@@ -205,7 +205,7 @@ def find_orfs(seq, min_protein_length, strand=1, trans_table=1):
     seq_len = len(seq)
 
     # nucleotide sequence
-    nuc = seq if strand == +1 else seq.reverse_complement()
+    nuc = seq if strand == 1 else seq.reverse_complement()
 
     # start at the begining of the translated sequence
     aa_start = 0
@@ -218,6 +218,10 @@ def find_orfs(seq, min_protein_length, strand=1, trans_table=1):
 
         # find the next methionine
         aa_start = trans.find("M", aa_start)
+        ## The only thing I could see was the scope of aa_end looked
+        ## odd.  So I moved it here.
+        ## Other than that, I don't bother keeping the list of answers
+        ## and sorting it, instead I simply print a bed entry.
         aa_end = 0
 
         while aa_start < trans_len:
@@ -234,12 +238,12 @@ def find_orfs(seq, min_protein_length, strand=1, trans_table=1):
                     start = frame + aa_start * 3
                     end = min(seq_len, frame + (aa_end * 3) + 3)
                 else:
-                    start = seq_len-frame - (aa_end * 3) - 3
+                    start = seq_len - frame - (aa_end * 3) - 3
                     end = seq_len - frame - (aa_start * 3)
 
-                # Add to output
                 str_strand = "+" if strand == 1 else '-'
-                answer.append((start, end, str_strand))
+                if (start > 0 and end < seq_len):
+                    answer.append((start, end, str_strand))
 
             # Find next Methionine and continue search
             aa_start = trans.find("M", aa_start + 1)
